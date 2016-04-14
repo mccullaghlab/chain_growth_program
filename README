@@ -1,0 +1,4 @@
+
+chain_growth.x
+
+Program to grow a polymer chain into a sphere of user defined radius.  The chain uses exluded volume, screened electrostatic, and harmonic angle potentials.
