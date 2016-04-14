@@ -23,6 +23,7 @@ module chainData
         real (kind=8) dih_eq
         real (kind=8) sphere_r 
         real (kind=8) sphere_k
+        real (kind=8) sigma12
         real (kind=8), allocatable :: chainCoord(:,:,:)
 
 endmodule chainData
@@ -75,11 +76,17 @@ subroutine grow_the_chain(outFile)
         integer minPoint
         real (kind=8) minEnergy
         real (kind=8) chainEnergy(nChains)
+        real (kind=8) rosenbluthWeights(nPoints)
+        real (kind=8) compute_point_rosenbluth_weight ! function
+        real (kind=8) totalPointRosenbluthWeight
+        real (kind=8) chainRosenbluthWeight
+        real (kind=8) pointProbability
         integer chain, minChain
 
         allocate(chainCoord(nChains,nMonomers,3))
         chainEnergy = 0
-        !$omp parallel private(r,chain, points,spherical,temp,monomer,newMonomerCoord,newMonomerEnergy,minEnergy,minPoint) shared(nMonomers,chainEnergy,bond_eq,chainCoord) num_threads(nThreads)
+        open(24,file=outFile)
+        !$omp parallel private(r,chain, points,spherical,temp,monomer,newMonomerCoord,newMonomerEnergy,minEnergy,minPoint,rosenbluthWeights,totalPointRosenbluthWeight,chainRosenbluthWeight,pointProbability) shared(nMonomers,chainEnergy,bond_eq,chainCoord) num_threads(nThreads)
         !$omp do 
         do chain = 1, nChains
                 write(*,'("Working on chain: ", i5)') chain
@@ -90,49 +97,45 @@ subroutine grow_the_chain(outFile)
                spherical(1) = sphere_r*r
                call spherical_to_cartesian(spherical, chainCoord(chain,1,:))
                ! pick random direction for second bead
-               call random_theta_phi(spherical(3), spherical(2))
-               spherical(1) = bond_eq
-               call spherical_to_cartesian(spherical, temp)
-               chainCoord(chain,2,:) = chainCoord(chain,1,:) + temp
-               
-               do monomer = 3, nMonomers
-        
+!               call random_theta_phi(spherical(3), spherical(2))
+!               spherical(1) = bond_eq
+!               call spherical_to_cartesian(spherical, temp)
+!               chainCoord(chain,2,:) = chainCoord(chain,1,:) + temp
+               chainRosenbluthWeight = 1.0
+               do monomer = 2, nMonomers
+                       totalPointRosenbluthWeight = 0.0 
+                       ! compute Rosenbluth weights of each point 
                        do points = 1, nPoints
         
                                call fibonacci_sphere(nPoints,points, temp, bond_eq)
                                newMonomerCoord(points,:) = chainCoord(chain,monomer-1,:) + temp
         
-                               call compute_new_monomer_energy(chainCoord(chain,1:monomer,:),monomer,newMonomerCoord(points,:),newMonomerEnergy(points))
+                               rosenbluthWeights(points) =  compute_point_rosenbluth_weight(chainCoord(chain,1:monomer,:),monomer,newMonomerCoord(points,:),newMonomerEnergy(points))
+                               totalPointRosenbluthWeight = totalPointRosenbluthWeight + rosenbluthWeights(points)
         
                        enddo
-        
+                       ! convert to probabilities and select point based on random number (uniformly distributed)
+                       call random_number(r)
+                       pointProbability =0.0
                        do points = 1, nPoints
-                               if (points==1 .or. newMonomerEnergy(points) < minEnergy) then
-                                       minEnergy = newMonomerEnergy(points)
-                                       minPoint = points
+                               pointProbability = pointProbability + rosenbluthWeights(points) / totalPointRosenbluthWeight
+                               if (r < pointProbability) then
+                                       exit
                                endif
                        enddo
-                       chainEnergy(chain) = chainEnergy(chain) + minEnergy
-                       chainCoord(chain,monomer,:) = newMonomerCoord(minPoint,:)
+                       chainRosenbluthWeight = chainRosenbluthWeight * rosenbluthWeights(points)
+                       chainCoord(chain,monomer,:) = newMonomerCoord(points,:)
                 enddo 
+                ! print xyz
+                write(24,'(i10)') nMonomers
+                write(24,'(f30.10)') chainRosenbluthWeight/dble(nPoints)
+                do monomer=1,nMonomers
+                        write(24,'("C  ",3f12.4)') chainCoord(chain,monomer,1), chainCoord(chain,monomer,2),chainCoord(chain,monomer,3)
+                enddo
         enddo
         !$omp end do nowait
         !$omp end parallel
         
-        do chain=1,nChains
-                print*, chain, chainEnergy(chain)
-                if (chain==1 .or. chainEnergy(chain) < minEnergy) then
-                        minEnergy = chainEnergy(chain)
-                        minChain = chain
-                endif
-        enddo
-        print*, "minChain = ", minChain
-        open(24,file=outFile)
-        write(24,'(i10)') nMonomers
-        write(24,'(i10)') nMonomers
-        do monomer=1,nMonomers
-                write(24,'("C  ",4f12.4)') chainCoord(minChain,monomer,1), chainCoord(minChain,monomer,2),chainCoord(minChain,monomer,3),sqrt(dot_product(chainCoord(minChain,monomer,:),chainCoord(minChain,monomer,:)))
-        enddo
         close(24)
 
 endsubroutine grow_the_chain
@@ -166,23 +169,13 @@ subroutine fibonacci_sphere(nPoints, point, xyz, r_seed)
 
 endsubroutine fibonacci_sphere
 
-subroutine compute_new_monomer_energy(chainCoord,nMonomers,newCoord,newEnergy)
-        use chainData, only : sphere_r
+real (kind=8) function compute_point_rosenbluth_weight(chainCoord,nMonomers,newCoord,newEnergy)
+        use chainData, only : sphere_r, sigma12
         implicit none
-!        real (kind=8), parameter :: a = 5e-15
-!        real (kind=8), parameter :: a = 5e-14
         real (kind=8), parameter :: a = 10.0
-!        real (kind=8), parameter :: sigma6 = 244140625.0
-!        real (kind=8), parameter :: sigma12 = 5.9604645e16
-!        real (kind=8), parameter :: sigma6 = 1771561.0
-!        real (kind=8), parameter :: sigma12 = 3138428376721.0
         real (kind=8), parameter :: charge_factor = 16.6025  ! dielectric of 80.0
-!        real (kind=8), parameter :: charge_factor = 25.000
-!        real (kind=8), parameter :: sigma6 = 262144.0
-!        real (kind=8), parameter :: sigma12 = 68719476736.0
         real (kind=8), parameter :: eps = 1.00
-        real (kind=8), parameter :: sigma = 25.0
-        real (kind=8) sigma12
+        real (kind=8), parameter :: beta = 1.642 ! 310 K in mol/kcal
         integer nMonomers
         real (kind=8) chainCoord(nMonomers,3)
         real (kind=8) newCoord(3)
@@ -191,7 +184,6 @@ subroutine compute_new_monomer_energy(chainCoord,nMonomers,newCoord,newEnergy)
         real (kind=8) diff(3)
         integer monomer
 
-        sigma12 = sigma**12
 
         newEnergy = 0
 
@@ -203,7 +195,7 @@ subroutine compute_new_monomer_energy(chainCoord,nMonomers,newCoord,newEnergy)
                 do monomer = 1, nMonomers-4 
                         diff = chainCoord(monomer,:) - newCoord
                         r2 = dot_product(diff,diff)
-                        if (monomer < nMonomers-10) then
+                        if (monomer < nMonomers-3) then
                                 r6 = r2*r2*r2
                                 r12 = r6*r6
                                 newEnergy = newEnergy + eps *  sigma12/r12 
@@ -215,11 +207,11 @@ subroutine compute_new_monomer_energy(chainCoord,nMonomers,newCoord,newEnergy)
 
         ! now add spherical boundary potential
         r2 = dot_product(newCoord,newCoord)
-        ! to the sixth power
-!        newEnergy = newEnergy + a * r2*r2*r2
         newEnergy = newEnergy + (a / (sphere_r-sqrt(r2))) ** 12
 
-endsubroutine
+        compute_point_rosenbluth_weight = exp(-beta * newEnergy)
+
+endfunction compute_point_rosenbluth_weight
 
 ! compute angle energy
 subroutine compute_angle_energy(r1,r2,r3,energy)
@@ -371,11 +363,13 @@ subroutine read_parm_file(parmFile)
 
         close(10)
 
-        ang_k = 0.00332
-        ang_eq = 2.76
-        dih_k = 0.00332
-        dih_eq = 2.76
-        bond_eq = 2.8
+        ang_k = 0.004039
+        ang_eq = 155.85*3.1415926535/180.0
+        bond_eq = 4.14
+        sigma12 = 13.0
+        sigma12 = sigma12*sigma12
+        sigma12 = sigma12*sigma12*sigma12
+        sigma12 = sigma12*sigma12
 
 endsubroutine read_parm_file
 
