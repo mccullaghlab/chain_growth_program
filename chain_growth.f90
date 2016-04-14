@@ -24,6 +24,7 @@ module chainData
         real (kind=8) sphere_r 
         real (kind=8) sphere_k
         real (kind=8) sigma12
+        real (kind=8) cut2
         real (kind=8), allocatable :: chainCoord(:,:,:)
 
 endmodule chainData
@@ -65,8 +66,8 @@ subroutine grow_the_chain(outFile)
         use chainData
         use ompData
         implicit none
-        integer, parameter :: nChains = 100 
-        integer, parameter :: nPoints = 60
+        integer, parameter :: nChains = 100
+        integer, parameter :: nPoints = 20
         real (kind=8) newMonomerCoord(nPoints,3)
         real (kind=8) newMonomerEnergy(nPoints)
         character*80 outFile
@@ -78,7 +79,7 @@ subroutine grow_the_chain(outFile)
         real (kind=8) chainEnergy(nChains)
         real (kind=8) rosenbluthWeights(nPoints)
         real (kind=8) compute_point_rosenbluth_weight ! function
-        real (kind=8) totalPointRosenbluthWeight
+        real (kind=8) totalMonomerRosenbluthWeight
         real (kind=8) chainRosenbluthWeight
         real (kind=8) pointProbability
         integer chain, minChain
@@ -86,7 +87,7 @@ subroutine grow_the_chain(outFile)
         allocate(chainCoord(nChains,nMonomers,3))
         chainEnergy = 0
         open(24,file=outFile)
-        !$omp parallel private(r,chain, points,spherical,temp,monomer,newMonomerCoord,newMonomerEnergy,minEnergy,minPoint,rosenbluthWeights,totalPointRosenbluthWeight,chainRosenbluthWeight,pointProbability) shared(nMonomers,chainEnergy,bond_eq,chainCoord) num_threads(nThreads)
+        !$omp parallel private(r,chain, points,spherical,temp,monomer,newMonomerCoord,newMonomerEnergy,minEnergy,minPoint,rosenbluthWeights,totalMonomerRosenbluthWeight,chainRosenbluthWeight,pointProbability) shared(nMonomers,chainEnergy,bond_eq,chainCoord) num_threads(nThreads)
         !$omp do 
         do chain = 1, nChains
                 write(*,'("Working on chain: ", i5)') chain
@@ -103,7 +104,7 @@ subroutine grow_the_chain(outFile)
 !               chainCoord(chain,2,:) = chainCoord(chain,1,:) + temp
                chainRosenbluthWeight = 1.0
                do monomer = 2, nMonomers
-                       totalPointRosenbluthWeight = 0.0 
+                       totalMonomerRosenbluthWeight = 0.0 
                        ! compute Rosenbluth weights of each point 
                        do points = 1, nPoints
         
@@ -111,27 +112,31 @@ subroutine grow_the_chain(outFile)
                                newMonomerCoord(points,:) = chainCoord(chain,monomer-1,:) + temp
         
                                rosenbluthWeights(points) =  compute_point_rosenbluth_weight(chainCoord(chain,1:monomer,:),monomer,newMonomerCoord(points,:),newMonomerEnergy(points))
-                               totalPointRosenbluthWeight = totalPointRosenbluthWeight + rosenbluthWeights(points)
+!                               print*, points, rosenbluthWeights(points)
+                               totalMonomerRosenbluthWeight = totalMonomerRosenbluthWeight + rosenbluthWeights(points)
         
                        enddo
                        ! convert to probabilities and select point based on random number (uniformly distributed)
                        call random_number(r)
                        pointProbability =0.0
                        do points = 1, nPoints
-                               pointProbability = pointProbability + rosenbluthWeights(points) / totalPointRosenbluthWeight
+                               pointProbability = pointProbability + rosenbluthWeights(points) / totalMonomerRosenbluthWeight
                                if (r < pointProbability) then
                                        exit
                                endif
                        enddo
-                       chainRosenbluthWeight = chainRosenbluthWeight * rosenbluthWeights(points)
+                       chainRosenbluthWeight = chainRosenbluthWeight * totalMonomerRosenbluthWeight/dble(nPoints)
+                       print*, monomer, chainRosenbluthweight
                        chainCoord(chain,monomer,:) = newMonomerCoord(points,:)
                 enddo 
                 ! print xyz
+                !$omp critical
                 write(24,'(i10)') nMonomers
-                write(24,'(f30.10)') chainRosenbluthWeight/dble(nPoints)
+                write(24,*) chainRosenbluthWeight
                 do monomer=1,nMonomers
                         write(24,'("C  ",3f12.4)') chainCoord(chain,monomer,1), chainCoord(chain,monomer,2),chainCoord(chain,monomer,3)
                 enddo
+                !$omp end critical
         enddo
         !$omp end do nowait
         !$omp end parallel
@@ -170,7 +175,7 @@ subroutine fibonacci_sphere(nPoints, point, xyz, r_seed)
 endsubroutine fibonacci_sphere
 
 real (kind=8) function compute_point_rosenbluth_weight(chainCoord,nMonomers,newCoord,newEnergy)
-        use chainData, only : sphere_r, sigma12
+        use chainData, only : sphere_r, sigma12, cut2
         implicit none
         real (kind=8), parameter :: a = 10.0
         real (kind=8), parameter :: charge_factor = 16.6025  ! dielectric of 80.0
@@ -195,13 +200,14 @@ real (kind=8) function compute_point_rosenbluth_weight(chainCoord,nMonomers,newC
                 do monomer = 1, nMonomers-4 
                         diff = chainCoord(monomer,:) - newCoord
                         r2 = dot_product(diff,diff)
-                        if (monomer < nMonomers-3) then
+                        if (r2 < cut2) then
                                 r6 = r2*r2*r2
                                 r12 = r6*r6
-                                newEnergy = newEnergy + eps *  sigma12/r12 
+                                ! excluded volume
+!                                newEnergy = newEnergy + eps *  sigma12/r12 
+                                ! charge
+                                newEnergy = newEnergy +  charge_factor/sqrt(r2)
                         endif
-                        newEnergy = newEnergy +  charge_factor/sqrt(r2)
-
                 enddo
         endif
 
@@ -367,9 +373,11 @@ subroutine read_parm_file(parmFile)
         ang_eq = 155.85*3.1415926535/180.0
         bond_eq = 4.14
         sigma12 = 13.0
+        cut2 = 20.0
         sigma12 = sigma12*sigma12
         sigma12 = sigma12*sigma12*sigma12
         sigma12 = sigma12*sigma12
+        cut2 = cut2*cut2
 
 endsubroutine read_parm_file
 

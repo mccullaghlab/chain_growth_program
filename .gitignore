@@ -32,4 +32,5 @@
 *.pdb
 *.dcd
 *.dat
-
+*.xyz
+prep
